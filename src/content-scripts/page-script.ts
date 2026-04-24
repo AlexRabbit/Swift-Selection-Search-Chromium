@@ -76,6 +76,8 @@ namespace ContentScript
 	let settings: SSS.Settings = null;
 	let sssIcons: { [id: string] : SSS.SSSIconDefinition; } = null;
 	let popupShowTimeout: number = null;
+	const ACQUIRE_SETTINGS_MAX_ATTEMPTS = 12;
+	let acquireSettingsAttempts = 0;
 
 	setTimeout(() => PopupCreator.onSearchEngineClick = onSearchEngineClick, 0);
 
@@ -253,6 +255,13 @@ namespace ContentScript
 	{
 		browser.runtime.sendMessage(new GetPopupSettingsMessage()).then(
 			popupSettings => {
+				if (!popupSettings || !popupSettings.settings) {
+					if (++acquireSettingsAttempts < ACQUIRE_SETTINGS_MAX_ATTEMPTS) {
+						setTimeout(() => acquireSettings(onSettingsAcquired), 25);
+					}
+					return;
+				}
+				acquireSettingsAttempts = 0;
 				settings = popupSettings.settings;
 				sssIcons = popupSettings.sssIcons;
 				onSettingsAcquired();
@@ -685,9 +694,20 @@ namespace PopupCreator
 			const shadowRoot = this.attachShadow({mode: "closed"});
 
 			const css = this.generateStylesheet(settings);
-			var style = document.createElement("style");
-			style.appendChild(document.createTextNode(css));
-			shadowRoot.appendChild(style);
+			let styled = false;
+			if (typeof CSSStyleSheet !== "undefined" && shadowRoot.adoptedStyleSheets !== undefined) {
+				try {
+					const sheet = new CSSStyleSheet();
+					sheet.replaceSync(css);
+					shadowRoot.adoptedStyleSheets = [sheet];
+					styled = true;
+				} catch (_unused) { /* fall back below */ }
+			}
+			if (!styled) {
+				const style = document.createElement("style");
+				style.appendChild(document.createTextNode(css));
+				shadowRoot.appendChild(style);
+			}
 
 			// create popup parent (will contain all icons): optional text field (top), engine row, optional text field (bottom)
 			this.content = document.createElement("div");
@@ -874,7 +894,7 @@ namespace PopupCreator
 					const sssEngine = engine as SSS.SearchEngine_SSS;
 					const sssIcon = sssIcons[sssEngine.id];
 
-					const iconImgSource = browser.extension.getURL(sssIcon.iconPath);
+					const iconImgSource = browser.runtime.getURL(sssIcon.iconPath);
 					const isInteractive = sssIcon.isInteractive !== false;	// undefined or true means it's interactive
 					icon = this.setupEngineIcon(sssEngine, iconImgSource, sssIcon.name, isInteractive, settings);
 

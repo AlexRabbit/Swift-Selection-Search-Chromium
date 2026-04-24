@@ -127,10 +127,27 @@ namespace SSS_Settings
 
 	document.addEventListener("DOMContentLoaded", onDOMContentLoaded);
 
+	function showSettingsPageLoadFailure(reason: unknown): void
+	{
+		document.body.style.display = "inherit";
+		const banner = document.createElement("div");
+		banner.setAttribute("role", "alert");
+		banner.textContent = "Swift Selection Search could not reach the extension background process. "
+			+ "Reload the extension from brave://extensions (or chrome://extensions), then open this page again. "
+			+ String(reason);
+		banner.style.cssText = "margin:16px;padding:14px;background:#fde7e7;border:1px solid #c62828;font:message-box;";
+		document.body.insertBefore(banner, document.body.firstChild);
+	}
+
 	// ask all needed information from the background script (can't use browser.extension.getBackgroundPage() in private mode, so it has to be this way)
 
 	browser.runtime.sendMessage({ type: "getDataForSettingsPage" }).then(
 		data => {
+			if (!data || !data.defaultSettings) {
+				showSettingsPageLoadFailure("Invalid response from background.");
+				return;
+			}
+
 			DEBUG = data.DEBUG;
 			browserVersion = data.browserVersion;
 			sssIcons = data.sssIcons;
@@ -152,8 +169,16 @@ namespace SSS_Settings
 			}
 			// if it isn't, set up page when DOM loads (onDOMContentLoaded)
 		},
-		getErrorHandler("Error sending getDataForSettingsPage message from settings.")
-	);
+		reason => {
+			const h = getErrorHandler("Error sending getDataForSettingsPage message from settings.");
+			if (h) { h(reason); }
+			showSettingsPageLoadFailure(reason);
+		}
+	).catch(reason => {
+		const h = getErrorHandler("Error sending getDataForSettingsPage message from settings.");
+		if (h) { h(reason); }
+		showSettingsPageLoadFailure(reason);
+	});
 
 	// default error handler for promises
 	function getErrorHandler(text: string): (reason: any) => void
@@ -561,13 +586,29 @@ namespace SSS_Settings
 
 			if (item.name === "importSettingsFromFileButton_real")
 			{
+				const fileInput = ev.target as HTMLInputElement;
+				const file = fileInput.files && fileInput.files[0];
+				if (!file) {
+					return;
+				}
 				const reader = new FileReader();
 				reader.onload = _ => {
-					const importedSettings = JSON.parse(reader.result as string);
+					let importedRoot: unknown;
+					try {
+						importedRoot = JSON.parse(reader.result as string);
+					} catch (parseErr) {
+						alert("Could not parse this file as JSON. Please choose a valid SSS settings backup.\n\n" + parseErr);
+						fileInput.value = "";
+						return;
+					}
+					const importedSettings = normalizeImportedSettingsRoot(importedRoot);
 					importSettings(importedSettings);
-					// alert("All settings were imported!");
 				};
-				reader.readAsText(ev.target.files[0]);
+				reader.onerror = _ => {
+					alert("Could not read the selected file.");
+					fileInput.value = "";
+				};
+				reader.readAsText(file);
 			}
 			// otherwise, if not a "special thing", this is a field
 			else {
@@ -1250,7 +1291,7 @@ namespace SSS_Settings
 		if (engine.type === SSS.SearchEngineType.SSS) {
 			// special SSS icons have data that never changes, so just get it from constants
 			const sssIcon = sssIcons[(engine as SSS.SearchEngine_SSS).id];
-			iconImgSource = browser.extension.getURL(sssIcon.iconPath);
+			iconImgSource = browser.runtime.getURL(sssIcon.iconPath);
 		} else {
 			iconImgSource = (engine as SSS.SearchEngine_NonSSS).iconUrl;
 		}
@@ -1702,10 +1743,27 @@ namespace SSS_Settings
 		return result;
 	}
 
+	// Accepts either a flat SSS settings object or a wrapped export (e.g. { settings: { ... } }).
+	function normalizeImportedSettingsRoot(parsed: unknown): any
+	{
+		if (!parsed || typeof parsed !== "object") {
+			return parsed;
+		}
+		const o = parsed as Record<string, unknown>;
+		if (Array.isArray(o.searchEngines)) {
+			return o;
+		}
+		if (o.settings && typeof o.settings === "object" && Array.isArray((o.settings as Record<string, unknown>).searchEngines)) {
+			return o.settings;
+		}
+		return o;
+	}
+
 	// applies a set of settings to the options page (reloads everything as if getting the user settings for the first time)
 	function importSettings(importedSettings)
 	{
-		if (importedSettings.searchEngines === undefined) {
+		if (!importedSettings || importedSettings.searchEngines === undefined) {
+			alert("This file does not look like a Swift Selection Search backup (missing \"searchEngines\").");
 			if (DEBUG) { log("imported settings are empty!", importedSettings); }
 			return;
 		}
@@ -1715,14 +1773,26 @@ namespace SSS_Settings
 		// run compatibility updates in case this is a backup made in an old version of SSS
 		browser.runtime.sendMessage({ type: "runBackwardsCompatibilityUpdates", settings: importedSettings }).then(
 			(_settings) => {
+				if (!_settings || !_settings.searchEngines) {
+					alert("Import failed: the extension background did not return valid settings. Try reloading the extension and importing again.");
+					return;
+				}
 				settings = _settings;
 
 				if (DEBUG) { log("imported settings!", settings); }
 				saveSettings(settings);
 				updateUIWithSettings();
 			},
-			getErrorHandler("Error sending runBackwardsCompatibilityUpdates message from settings.")
-		);
+			reason => {
+				const h = getErrorHandler("Error sending runBackwardsCompatibilityUpdates message from settings.");
+				if (h) { h(reason); }
+				alert("Import failed: could not talk to the extension background. Reload the extension from the extensions page, then try again.\n\n" + String(reason));
+			}
+		).catch(reason => {
+			const h = getErrorHandler("Error sending runBackwardsCompatibilityUpdates message from settings.");
+			if (h) { h(reason); }
+			alert("Import failed.\n\n" + String(reason));
+		});
 	}
 
 	function updateColorText(text, value)

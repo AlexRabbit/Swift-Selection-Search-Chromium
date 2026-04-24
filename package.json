@@ -9,7 +9,8 @@
     "build:tests": "esbuild tests/browser-entry.ts --bundle --outfile=tests/tests-browser-bundle.js --format=iife --platform=browser",
     "watch": "tsc -p tsconfig.json --watch",
     "test": "tsx tests/browser-entry.ts",
-    "check": "npm run build && npm test"
+    "check": "npm run build && npm test",
+    "dist": "npm run build && node scripts/pack-extension.mjs"
   },
   "author": "Daniel Lobo",
   "license": "MIT",
@@ -19,6 +20,7 @@
     "webextension-polyfill": "^0.12.0"
   },
   "devDependencies": {
+    "archiver": "^7.0.1",
     "esbuild": "^0.25.0",
     "tsx": "^4.19.3"
   }

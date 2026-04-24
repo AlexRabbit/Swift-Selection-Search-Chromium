@@ -2,6 +2,7 @@
 Thumbs.db
 .vscode
 /node_modules
+/release
 *.js
 
 # but not these files

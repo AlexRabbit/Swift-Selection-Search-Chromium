@@ -496,6 +496,20 @@ namespace SSS
 	/* -------------- SETUP --------------- */
 	/* ------------------------------------ */
 
+	function applySettingsToRuntime(settings: Settings): void
+	{
+		uniqueIdToEngineDictionary = {};
+		for (const engine of settings.searchEngines) {
+			uniqueIdToEngineDictionary[engine.uniqueId] = engine;
+		}
+
+		// save settings and also keep subsets of them for content-script-related purposes
+		sss.settings = settings;
+		sss.activationSettingsForContentScript = getActivationSettingsForContentScript(settings);
+		sss.settingsForContentScript = getPopupSettingsForContentScript(settings);
+		sss.blockedWebsitesCache = buildBlockedWebsitesCache(settings.websiteBlocklist);
+	}
+
 	// Main SSS setup. Called when settings are acquired. Prepares everything.
 	function onSettingsAcquired(settings: Settings)
 	{
@@ -511,20 +525,14 @@ namespace SSS
 		}
 
 		if (doSaveSettings) {
+			// Populate caches before persisting so cold content scripts / options page never see
+			// undefined settings while storage.local.set() is in flight (MV3 service worker race).
+			applySettingsToRuntime(settings);
 			browser.storage.local.set(settings);
 			return;	// calling "set" will trigger this whole function again, so quit before wasting time
 		}
 
-		uniqueIdToEngineDictionary = {};
-		for (const engine of settings.searchEngines) {
-			uniqueIdToEngineDictionary[engine.uniqueId] = engine;
-		}
-
-		// save settings and also keep subsets of them for content-script-related purposes
-		sss.settings = settings;
-		sss.activationSettingsForContentScript = getActivationSettingsForContentScript(settings);
-		sss.settingsForContentScript = getPopupSettingsForContentScript(settings);
-		sss.blockedWebsitesCache = buildBlockedWebsitesCache(settings.websiteBlocklist);
+		applySettingsToRuntime(settings);
 
 		if (isFirstLoad) {
 			if (DEBUG) { log("loading ", settings); }
@@ -805,7 +813,7 @@ namespace SSS
 	}
 
 	// act when a content script requests something from this script
-	function onContentScriptMessage(msg, sender, callbackFunc)
+	function onContentScriptMessage(msg, sender): Promise<unknown> | void
 	{
 		if (DEBUG) {
 			if (msg.type !== "log") {
@@ -818,8 +826,17 @@ namespace SSS
 			// messages from content script
 
 			case "getPopupSettings":
-				callbackFunc(sss.settingsForContentScript);
-				break;
+				if (sss.settingsForContentScript) {
+					return Promise.resolve(sss.settingsForContentScript);
+				}
+				// Service worker can receive messages before the first storage.local.get() finishes (MV3).
+				return browser.storage.local.get().then(raw => {
+					let st = raw as unknown as Settings;
+					if (st === undefined || isObjectEmpty(st as object)) {
+						st = defaultSettings;
+					}
+					return getPopupSettingsForContentScript(st);
+				});
 
 			case "engineClick":
 				onSearchEngineClick(msg.engine, msg.openingBehaviour, msg.selection, msg.href, null);
@@ -832,24 +849,28 @@ namespace SSS
 			// messages from settings page
 
 			case "getDataForSettingsPage":
-				callbackFunc({
+				return Promise.resolve({
 					DEBUG: DEBUG,
 					browserVersion: browserVersion,
 					sssIcons: sssIcons,
 					defaultSettings: defaultSettings
 				});
-				break;
 
 			case "runBackwardsCompatibilityUpdates":
+				// Import path sends a fresh object; rebuild ID map so generateUniqueEngineId / lookups stay consistent.
+				uniqueIdToEngineDictionary = {};
+				for (const engine of msg.settings.searchEngines) {
+					if (engine.uniqueId) {
+						uniqueIdToEngineDictionary[engine.uniqueId] = engine;
+					}
+				}
 				runBackwardsCompatibilityUpdates(msg.settings);
-				callbackFunc(msg.settings);
-				break;
+				return Promise.resolve(msg.settings);
 
 			case "generateUniqueEngineId":
 				// Generate an ID but don't provide any engine since this message happens for engines currently being created in the settings menu.
 				// After the engine is created, the settings will be saved and we'll regenerate the IDs dictionary then.
-				callbackFunc(generateUniqueEngineId());
-				break;
+				return Promise.resolve(generateUniqueEngineId());
 
 			default: break;
 		}
@@ -1088,6 +1109,11 @@ namespace SSS
 		const injectBase = { target, injectImmediately: true };
 
 		try {
+			// Chromium content scripts only have `chrome` unless we load the polyfill first.
+			await scriptingApi.executeScript({
+				...injectBase,
+				files: ["libs/browser-polyfill.min.js"],
+			});
 			if (DEBUG) {
 				await scriptingApi.executeScript({
 					...injectBase,

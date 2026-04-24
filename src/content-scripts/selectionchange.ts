@@ -9,19 +9,26 @@ namespace selectionchange
 	export const modifierKey = MAC ? "metaKey" : "ctrlKey";
 
 	let ranges = null;
+	let nativeSelectionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	export function start() {
 		ranges = getSelectedRanges();
 		document.addEventListener("input", onInput, true);
 		document.addEventListener("keydown", onKeyDown, true);
 		document.addEventListener("mouseup", onMouseUp, true);
+		document.addEventListener("selectionchange", onNativeSelectionChange, true);
 	}
 
 	export function stop() {
 		ranges = null;
+		if (nativeSelectionDebounceTimer !== null) {
+			clearTimeout(nativeSelectionDebounceTimer);
+			nativeSelectionDebounceTimer = null;
+		}
 		document.removeEventListener("input", onInput, true);
 		document.removeEventListener("keydown", onKeyDown, true);
 		document.removeEventListener("mouseup", onMouseUp, true);
+		document.removeEventListener("selectionchange", onNativeSelectionChange, true);
 	}
 
 	export class CustomSelectionChangeEvent extends CustomEvent<any>
@@ -71,6 +78,21 @@ namespace selectionchange
 		if (ev.button === 0) {
 			setTimeout(() => dispatchEventIfSelectionChanged(isInputField(ev.target), ev, true), 0);
 		}
+	}
+
+	// Chromium also fires the native selectionchange event; pairing it with the polyfill covers
+	// edge cases where the selection updates without a matching mouseup path (matches Firefox UX more closely).
+	// Debounce so we do not spam while the user is still dragging a selection.
+	function onNativeSelectionChange()
+	{
+		if (nativeSelectionDebounceTimer !== null) {
+			clearTimeout(nativeSelectionDebounceTimer);
+		}
+		nativeSelectionDebounceTimer = setTimeout(() => {
+			nativeSelectionDebounceTimer = null;
+			const ev = { altKey: false } as KeyboardEvent;
+			setTimeout(() => dispatchEventIfSelectionChanged(false, ev, false), 0);
+		}, 20);
 	}
 
 	function dispatchEventIfSelectionChanged(force, ev, isMouse)
