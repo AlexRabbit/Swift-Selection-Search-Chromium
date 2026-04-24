@@ -1,3 +1,5 @@
+const SearchVariables = (globalThis as Record<string, unknown>)["SearchVariables"] as any;
+
 class Test
 {
 	constructor(public variableName: string, public url: string, public expectedModifications: SearchVariables.SearchVariableModifications, public example: ExampleSelection) { }
@@ -151,8 +153,10 @@ function runTests()
 
 function echo(text: string)
 {
-	document.body.appendChild(document.createTextNode(text));
-	document.body.appendChild(document.createElement("br"));
+	if (typeof document !== "undefined" && document.body) {
+		document.body.appendChild(document.createTextNode(text));
+		document.body.appendChild(document.createElement("br"));
+	}
 	console.log(text);
 }
 

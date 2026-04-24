@@ -55,6 +55,11 @@ namespace ContentScript
 
 	const DEBUG = typeof DEBUG_STATE !== "undefined" && DEBUG_STATE === true;
 
+	// Chromium/Brave do not implement originalTarget on keyboard events (Firefox-only).
+	function eventTarget(ev: Event): EventTarget {
+		return (ev as KeyboardEvent & { originalTarget?: EventTarget }).originalTarget ?? ev.target;
+	}
+
 	if (DEBUG) {
 		// To have all log messages in the same console, we always request the background script to log.
 		// Otherwise content script messages will be in the Web Console instead of the Dev Tools Console.
@@ -452,7 +457,7 @@ namespace ContentScript
 		if (!ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey	// modifiers are not supported right now
 			&& !isAnyEditableFieldFocused())							// shortcuts are disabled in editable fields
 		{
-			if ((isPopupVisible && ev.originalTarget.className !== "sss-input-field")				// if using popup, make sure we're not inside the popup's text field
+			if ((isPopupVisible && (eventTarget(ev) as HTMLElement).className !== "sss-input-field")				// if using popup, make sure we're not inside the popup's text field
 				|| (activationSettings.useEngineShortcutWithoutPopup && saveCurrentSelection()))	// if outside popup, ensure a selection exists, otherwise we crash later
 			{
 				if (settings !== null) {
@@ -473,7 +478,7 @@ namespace ContentScript
 			const lastIcon = popup.enginesContainer.lastChild as HTMLImageElement;
 
 			// Focus the first icon for the first time, as well as after the last one so as to keep looping them.
-			if (document.activeElement.nodeName !== "SSS-POPUP" || ev.originalTarget === lastIcon) {
+			if (document.activeElement.nodeName !== "SSS-POPUP" || eventTarget(ev) === lastIcon) {
 				firstIcon.focus();
 				ev.preventDefault();
 				return;
@@ -487,12 +492,12 @@ namespace ContentScript
 			let openingBehaviour;
 
 			// if we're inside the popup's text field, grab the first user-defined engine and search using that
-			if (ev.originalTarget.nodeName === "INPUT") {
+			if ((eventTarget(ev) as HTMLElement).nodeName === "INPUT") {
 				engine = settings.searchEngines.find(e => e.type !== SSS.SearchEngineType.SSS);
 				openingBehaviour = SSS.OpenResultBehaviour.NewBgTab;	// for now, using enter is the same as ctrl-clicking
 			} else {
 				// if cycling the icons using "tab", grab the focused icon
-				const engineIndex = [...popup.enginesContainer.children].indexOf(ev.originalTarget);
+				const engineIndex = [...popup.enginesContainer.children].indexOf(eventTarget(ev) as HTMLElement);
 				engine = settings.searchEngines[engineIndex];
 				openingBehaviour = settings.shortcutBehaviour;
 			}
@@ -684,25 +689,24 @@ namespace PopupCreator
 			style.appendChild(document.createTextNode(css));
 			shadowRoot.appendChild(style);
 
-			// create popup parent (will contain all icons)
+			// create popup parent (will contain all icons): optional text field (top), engine row, optional text field (bottom)
 			this.content = document.createElement("div");
 			this.content.classList.add("sss-content");
 			shadowRoot.appendChild(this.content);
 
-			if (settings.showSelectionTextField)
-			{
+			if (settings.showSelectionTextField) {
 				this.inputField = document.createElement("input");
 				this.inputField.type = "text";
 				this.inputField.classList.add("sss-input-field");
-				this.content.appendChild(this.inputField);
 			}
+
+			this.enginesContainer = document.createElement("div");
+			this.enginesContainer.classList.add("sss-engines");
 
 			if (this.inputField && settings.selectionTextFieldLocation === SSS.SelectionTextFieldLocation.Top) {
 				this.content.appendChild(this.inputField);
 			}
 
-			this.enginesContainer = document.createElement("div");
-			this.enginesContainer.classList.add("sss-engines");
 			this.content.appendChild(this.enginesContainer);
 
 			if (this.inputField && settings.selectionTextFieldLocation === SSS.SelectionTextFieldLocation.Bottom) {

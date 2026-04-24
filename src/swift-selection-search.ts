@@ -456,14 +456,25 @@ namespace SSS
 	// show message on installation
 	browser.runtime.onInstalled.addListener(details => {
 		if (details.reason == "install") {
-			browser.tabs.create({ url: "/res/msg-pages/sss-intro.html" });
+			browser.tabs.create({ url: browser.runtime.getURL("res/msg-pages/sss-intro.html") });
 		}
 	});
 
-	// get browser version and then startup
-	browser.runtime.getBrowserInfo().then(browserInfo => {
-		browserVersion = parseInt(browserInfo.version.split(".")[0]);
-		if (DEBUG) { log("Firefox is version " + browserVersion); }
+	function resolveBrowserMajorVersion(): Promise<number>
+	{
+		const rt = browser.runtime as typeof browser.runtime & { getBrowserInfo?: () => Promise<{ version: string }> };
+		if (typeof rt.getBrowserInfo === "function") {
+			return rt.getBrowserInfo().then(browserInfo => parseInt(browserInfo.version.split(".")[0], 10));
+		}
+		const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+		const m = ua.match(/(?:Chrome|Chromium|Brave|Edg)\/(\d+)/);
+		return Promise.resolve(m ? parseInt(m[1], 10) : 0);
+	}
+
+	// get browser version and then startup (getBrowserInfo is Firefox-only; Chromium/Brave use UA)
+	resolveBrowserMajorVersion().then(version => {
+		browserVersion = version;
+		if (DEBUG) { log("Browser major version is " + browserVersion); }
 
 		// Clear all settings (for test purposes only).
 		// Since the mistake from version 3.43.0, "removeToUse" was added to the call
@@ -965,10 +976,10 @@ namespace SSS
 
 	function setup_Commands()
 	{
-		// clear any old registrations
-		if (browser.commands.onCommand.hasListener(onCommand)) {
+		// clear any old registrations (hasListener is Firefox-only; Chromium/Brave only support removeListener)
+		try {
 			browser.commands.onCommand.removeListener(onCommand);
-		}
+		} catch (_unused) { /* listener was not registered */ }
 
 		// register keyboard shortcuts
 		if (sss.settings.popupOpenBehaviour !== PopupOpenBehaviour.Off) {
@@ -1020,10 +1031,7 @@ namespace SSS
 			browser.tabs.query({}).then(installOnOpenTabs, getErrorHandler("Error querying tabs."));
 		}
 
-		if (browser.webRequest)
-		{
-			registerCSPModification();
-		}
+		// MV3: blocking webRequest is unavailable. Popup uses closed Shadow DOM styles; strict CSP sites may be limited.
 	}
 
 	function onDOMContentLoaded(details)
@@ -1055,75 +1063,54 @@ namespace SSS
 
 	function injectContentScript(tabId: number, frameId?: number, allFrames: boolean = false)
 	{
+		void injectContentScriptAsync(tabId, frameId, allFrames);
+	}
+
+	// MV3: uses chrome.scripting (exposed as browser.scripting via polyfill). Runs at document start via injectImmediately.
+	async function injectContentScriptAsync(tabId: number, frameId?: number, allFrames: boolean = false): Promise<void>
+	{
 		if (DEBUG) { log("injectContentScript " + tabId + " frameId: " + frameId + " allFrames: " + allFrames); }
 
 		const errorHandler = getErrorHandler(`Error injecting page content script in tab ${tabId}.`);
-
-		const executeScriptOptions: browser.extensionTypes.InjectDetails = {
-			runAt: "document_start",
-			frameId: frameId,
-			allFrames: allFrames,
-			file: undefined,
-			code: undefined,
-		};
-
-		// Save function for either calling it as a callback to another function (1), or as its own call (2).
-		const injectPageScript = () => {
-			executeScriptOptions.file = "/content-scripts/selectionchange.js";
-			browser.tabs.executeScript(tabId, executeScriptOptions).then(() => {
-				executeScriptOptions.file = "/content-scripts/page-script.js";
-				browser.tabs.executeScript(tabId, executeScriptOptions)
-					.then(() => browser.tabs.get(tabId).then(activateTab), errorHandler)
-			}, errorHandler);
-		};
-
-		// The DEBUG variable is also passed if true, so we only have to declare debug mode once: at the top of this background script.
-		if (DEBUG) {
-			executeScriptOptions.code = "var DEBUG_STATE = " + DEBUG + ";",
-			browser.tabs.executeScript(tabId, executeScriptOptions).then(injectPageScript, errorHandler);	// (1) callback to another function
-			executeScriptOptions.code = undefined;	// remove "code" field from object
-		} else {
-			injectPageScript();	// (2) own call
+		const scriptingApi = (browser as unknown as { scripting?: { executeScript: (inj: object) => Promise<unknown> } }).scripting;
+		if (!scriptingApi) {
+			console.error("[Swift Selection Search] browser.scripting is missing; Manifest V3 requires the \"scripting\" permission.");
+			return;
 		}
-	}
 
-	/* ------------------------------------ */
-	/* ------- HEADER MODIFICATION -------- */
-	/* ------------------------------------ */
+		const target: { tabId: number; allFrames?: boolean; frameIds?: number[] } = { tabId };
+		if (allFrames) {
+			target.allFrames = true;
+		} else if (frameId !== undefined) {
+			target.frameIds = [frameId];
+		}
 
-	// Some pages have a restrictive CSP that blocks things, but extensions can modify the CSP to allow their own modifications
-	// (as long as they have the needed permissions). In particular, SSS needs to use inline style blocks.
-	function registerCSPModification()
-	{
-		browser.webRequest.onHeadersReceived.removeListener(modifyCSPRequest);
+		const injectBase = { target, injectImmediately: true };
 
-		if (DEBUG) { log("registering with onHeadersReceived"); }
-
-		browser.webRequest.onHeadersReceived.addListener(
-			modifyCSPRequest,
-			{ urls : [ "http://*/*", "https://*/*" ], types: [ "main_frame" ] },
-			[ "blocking", "responseHeaders" ]
-		);
-	}
-
-	function modifyCSPRequest(details)
-	{
-		for (const responseHeader of details.responseHeaders)
-		{
-			const headerName = responseHeader.name.toLowerCase();
-			if (headerName !== "content-security-policy" && headerName !== "x-webkit-csp") continue;
-
-			const CSP_SOURCE = "style-src ";	// the trailing space is important, otherwise we also match things like "style-src-attr" or "style-src-elem"
-
-			if (responseHeader.value.includes(CSP_SOURCE))
-			{
-				if (DEBUG) { log("CSP is: " + responseHeader.value); }
-				responseHeader.value = responseHeader.value.replace(CSP_SOURCE, CSP_SOURCE + "'unsafe-inline' ");
-				if (DEBUG) { log("modified CSP to include style-src 'unsafe-inline': " + responseHeader.value); }
+		try {
+			if (DEBUG) {
+				await scriptingApi.executeScript({
+					...injectBase,
+					func: (debugVal: boolean) => {
+						(globalThis as unknown as { DEBUG_STATE?: boolean }).DEBUG_STATE = debugVal;
+					},
+					args: [DEBUG],
+				});
+			}
+			await scriptingApi.executeScript({
+				...injectBase,
+				files: ["content-scripts/selectionchange.js"],
+			});
+			await scriptingApi.executeScript({
+				...injectBase,
+				files: ["content-scripts/page-script.js"],
+			});
+			await browser.tabs.get(tabId).then(activateTab);
+		} catch (e) {
+			if (errorHandler) {
+				errorHandler(e);
 			}
 		}
-
-		return details;
 	}
 
 	/* ------------------------------------ */
